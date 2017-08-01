@@ -1,4 +1,5 @@
 require 'json'
+require 'csv'
 
 
 if ARGV.length != 1
@@ -197,7 +198,7 @@ class Tracer
   end
   
   def print(message)
-    @io.puts("#{indentation}#{message}")
+    @io.puts("#{indentation}#{message}\n")
   end
   
   def indentation
@@ -308,20 +309,41 @@ class DecimalNumberMerger
 end
 
 module TotalPaymentAmount
-  class LookToTheRightStrategy
+  class LookToTheRightComposerStrategy
     def initialize(tracer)
       @tracer = tracer
     end
+    
+    def find(annotations)
+      ['due', 'total', 'balance'].each do |reference_word|
+        total_payment_amount = LookToTheRightStrategy
+          .new(@tracer, reference_word)
+          .find(annotations)
+          
+        return total_payment_amount if total_payment_amount 
+      end
+      
+      return nil
+    end
+  end
+  
+  class LookToTheRightStrategy
+    def initialize(tracer, reference_word)
+      @tracer = tracer
+      @reference_word = reference_word.downcase
+    end
   
     def find(annotations)    
-      first_total_payment_amount(annotations)
+      largest_total_payment_amount(annotations)
     end  
   
     private
   
-    def first_total_payment_amount(annotations)
-      @tracer.trace('Finding first total payment amount') do
-        all_total_payment_amounts(annotations).first
+    def largest_total_payment_amount(annotations)
+      @tracer.trace('Finding largest total payment amount') do
+        all_total_payment_amounts(annotations).max_by do |annotation|
+          annotation.description.to_f
+        end
       end
     end
   
@@ -340,9 +362,7 @@ module TotalPaymentAmount
     def total_payment_labels(annotations)
       @tracer.trace('Finding all total payment labels') do
         annotations.select do |annotation|
-          annotation.description.downcase == 'due' ||
-          annotation.description.downcase == 'total' ||
-          annotation.description.downcase == 'balance'
+          annotation.description.downcase == @reference_word
         end
       end
     end
@@ -372,7 +392,7 @@ module TotalPaymentAmount
     def decimal_numbers(annotations)
       @tracer.trace('Finding decimal numbers') do
         annotations.select do |annotation|
-          annotation.description =~ /\A\d+\.\d+\z/ ? annotation : nil
+          annotation.description =~ /\A\d+\.\d\d\z/ ? annotation : nil
         end
       end
     end
@@ -394,4 +414,16 @@ end
 
 
 annotations = AnnotationsFactory.new(JSON.parse(File.read(file))).create_annotations
-puts TotalPaymentAmount::LookToTheRightStrategy.new(Tracer.new($stdout)).find(annotations).description
+annotation = TotalPaymentAmount::LookToTheRightComposerStrategy.new(Tracer.new($stdout)).find(annotations)
+
+file =~ /(\d+)_\d+/
+csv = "#{$1}.csv"
+amount = CSV.read(csv)[1][3]
+extracted = annotation ? annotation.description : ''
+
+puts "image: #{file}"
+puts "csv: #{csv}"
+puts "amount: #{amount}"
+puts "found: #{extracted}"
+puts "match: #{amount == extracted}"
+puts
