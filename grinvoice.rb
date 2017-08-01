@@ -214,75 +214,71 @@ class Tracer
   end
 end
 
-class DecimalNumberStateMachine
-  attr_reader :left_number, :decimal, :right_number
-  
-  def initialize(result)
-    @result = result
-    @state = :left
-    @left_number = nil
-    @decimal = nil
-    @right_number = nil
+class DecimalNumberStateMachine  
+  def initialize
+    @result = []
+    reset
   end
   
   def process(annotation)
-    @state = if @state == :left
-      process_left(annotation)
+    @segments << annotation
+    
+    if @state == :start
+      process_start(annotation)
+    elsif @state == :left_number
+      process_left_number(annotation)
+    elsif @state == :comma
+      process_comma(annotation)
     elsif @state == :decimal
       process_decimal(annotation)
-    elsif @state == :right
-      process_right(annotation)
     end
   end
   
   def finish
-    @result << @left_number if @left_number
-    @result << @decimal if @decimal
+    reset
+    @result
   end
   
   private
   
-  def process_left(annotation)
+  def process_start(annotation)
     if number?(annotation)
-      @left_number = annotation
-      :decimal
+      @state = :left_number
     else
-      @result << annotation
+      reset
+    end
+  end
+  
+  def process_left_number(annotation)
+    if decimal?(annotation)
+      @state = :decimal
+    elsif comma?(annotation)
+      @state = :comma
+    else
       reset
     end
   end
   
   def process_decimal(annotation)
-    if decimal?(annotation)
-      @decimal = annotation
-      :right
-    else
-      @result << @left_number
-      @result << annotation
-      reset
+    if number?(annotation)
+      @segments = [AnnotationMerger.new(@segments).merged]
     end
+    
+    reset
   end
   
-  def process_right(annotation)
+  def process_comma(annotation)
     if number?(annotation)
-      @right_number = annotation
-      @result << AnnotationMerger.new([@left_number, @decimal, @right_number]).merged
-      reset
+      @state = :left_number
     else
-      @result << @left_number
-      @result << @decimal
-      @result << annotation
       reset
     end
   end
   
   def reset
-    @left_number = nil
-    @decimal = nil
-    @right_number = nil
-    @state = :left
-    
-    @state
+    @state = :start
+    @result.push(*@segments)
+    @segments = []
   end
   
   def number?(annotation)
@@ -292,19 +288,20 @@ class DecimalNumberStateMachine
   def decimal?(annotation)
     annotation.description == '.'
   end
+  
+  def comma?(annotation)
+    annotation.description == ','
+  end
 end
 
 class DecimalNumberMerger  
   def merge(annotations)
-    result = []
-    state_machine = DecimalNumberStateMachine.new(result)
+    state_machine = DecimalNumberStateMachine.new
     
     annotations.each do |annotation|
       state_machine.process(annotation)
     end
     state_machine.finish
-    
-    result
   end
 end
 
@@ -392,7 +389,7 @@ module TotalPaymentAmount
     def decimal_numbers(annotations)
       @tracer.trace('Finding decimal numbers') do
         annotations.select do |annotation|
-          annotation.description =~ /\A\d+\.\d\d\z/ ? annotation : nil
+          annotation.description =~ /\A\d+,?\d*\.\d\d\z/ ? annotation : nil
         end
       end
     end
@@ -419,7 +416,7 @@ annotation = TotalPaymentAmount::LookToTheRightComposerStrategy.new(Tracer.new($
 file =~ /(\d+)_\d+/
 csv = "#{$1}.csv"
 amount = CSV.read(csv)[1][3]
-extracted = annotation ? annotation.description : ''
+extracted = annotation ? annotation.description.gsub(' ', '') : ''
 
 puts "image: #{file}"
 puts "csv: #{csv}"
