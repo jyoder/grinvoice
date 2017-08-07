@@ -1,5 +1,6 @@
 require 'json'
 require 'csv'
+require 'date'
 
 
 if ARGV.length != 1
@@ -15,39 +16,22 @@ class AnnotationsFactory
   
   def create_annotations
     DecimalNumberMerger.new.merge(
-      select_reasonably_sized(
-        annotations_json.map do |annotation|
-          Annotation.new(
-            annotation['description'],
-            BoundsFactory.new(annotation['boundingPoly']).create_bounds
-          )
-        end
-      )
+      annotations_json.map do |annotation|
+        Annotation.new(
+          annotation['description'],
+          BoundsFactory.new(annotation['boundingPoly']).create_bounds
+        )
+      end
     )
   end
   
   private
-  
-  def select_reasonably_sized(annotations)
-    annotations.select do |annotation|
-      annotation.bounds.width <= reasonable_width &&
-      annotation.bounds.height <= reasonable_height
-    end
-  end
   
   def annotations_json
     responses = @bill_json['responses']
     response = responses.first if responses
     text_annotations = response['textAnnotations'] if response
     text_annotations || []
-  end
-  
-  def reasonable_width
-    200
-  end
-  
-  def reasonable_height
-    200
   end
 end
 
@@ -176,7 +160,7 @@ class Tracer
     end
     
     enter_scope
-    results = block.call
+    results = block.call if block_given?
     exit_scope
     
     print("#{message} results: #{summarize(results)}")
