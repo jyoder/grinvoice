@@ -15,13 +15,15 @@ class AnnotationsFactory
   end
   
   def create_annotations
-    DecimalNumberMerger.new.merge(
-      annotations_json.map do |annotation|
-        Annotation.new(
-          annotation['description'],
-          BoundsFactory.new(annotation['boundingPoly']).create_bounds
-        )
-      end
+    DateMerger.new.merge(
+      DecimalNumberMerger.new.merge(
+        annotations_json.map do |annotation|
+          Annotation.new(
+            annotation['description'],
+            BoundsFactory.new(annotation['boundingPoly']).create_bounds
+          )
+        end
+      )
     )
   end
   
@@ -390,6 +392,112 @@ module TotalPaymentAmount
         annotation_1.bounds.top_left.x <=> annotation_2.bounds.top_left.x
       end
     end
+  end
+end
+
+class DateStateMachine
+  def initialize
+    @result = []
+    @current_separator = nil
+    reset
+  end
+  
+  def process(annotation)
+    @segments << annotation
+    
+    if @state == :start
+      process_start(annotation)
+    elsif @state == :separator_1
+      process_separator_1(annotation)
+    elsif @state == :month
+      process_month(annotation)
+    elsif @state == :separator_2
+      process_separator_2(annotation)
+    elsif @state == :year
+      process_year(annotation)
+    end
+  end
+  
+  def finish
+    reset
+    @result
+  end
+  
+  private
+  
+  def process_start(annotation)
+    if number?(annotation)
+      @state = :separator_1
+    else
+      reset
+    end
+  end
+  
+  def process_separator_1(annotation)
+    if separator?(annotation)
+      @state = :month
+      @current_separator = annotation.description
+    else
+      reset
+    end
+  end
+  
+  def process_month(annotation)
+    if number?(annotation)
+      @state = :separator_2
+    else
+      reset
+    end
+  end
+  
+  def process_separator_2(annotation)
+    if annotation.description == @current_separator
+      @state = :year
+    else
+      reset
+    end
+  end
+  
+  def process_year(annotation)
+    if number?(annotation)
+      segments = @segments.map { |segment| convert_o_to_zero(segment) }
+      @segments = [AnnotationMerger.new(segments).merged]
+    end
+    
+    reset
+  end
+  
+  def reset
+    @state = :start
+    @current_separator = nil
+    @result.push(*@segments)
+    @segments = []
+  end
+  
+  def number?(annotation)
+    annotation.description =~ /\AO?\d+\Z/
+  end
+  
+  def separator?(annotation)
+    annotation.description =~ /\A(,|\.|-|\/)\Z/
+  end
+  
+  def convert_o_to_zero(annotation)
+    Annotation.new(
+      annotation.description.gsub('O', '0'),
+      annotation.bounds
+    )
+  end
+end
+
+class DateMerger  
+  def merge(annotations)
+    state_machine = DateStateMachine.new
+    
+    annotations.each do |annotation|
+      state_machine.process(annotation)
+    end
+    state_machine.finish
   end
 end
 
