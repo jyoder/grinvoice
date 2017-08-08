@@ -15,14 +15,16 @@ class AnnotationsFactory
   end
   
   def create_annotations
-    DateMerger.new.merge(
-      DecimalNumberMerger.new.merge(
-        annotations_json.map do |annotation|
-          Annotation.new(
-            annotation['description'],
-            BoundsFactory.new(annotation['boundingPoly']).create_bounds
-          )
-        end
+    WrittenDateMerger.new.merge(
+      DateMerger.new.merge(
+        DecimalNumberMerger.new.merge(
+          annotations_json.map do |annotation|
+            Annotation.new(
+              annotation['description'],
+              BoundsFactory.new(annotation['boundingPoly']).create_bounds
+            )
+          end
+        )
       )
     )
   end
@@ -80,16 +82,21 @@ class Annotation
     @description = description
     @bounds = bounds
   end
+  
+  def to_s
+    "#{@description} (#{@bounds.center})"
+  end
 end
 
 class AnnotationMerger
-  def initialize(annotations)
+  def initialize(annotations, separator = '')
     @annotations = annotations
+    @separator = separator
   end
   
   def merged
     Annotation.new(
-      @annotations.map(&:description).join,
+      @annotations.map(&:description).join(@separator),
       Bounds.new(top_left, top_right, bottom_right, bottom_left))
   end
   
@@ -137,6 +144,10 @@ class Bounds
   def height
     @bottom_left.y - @top_left.y
   end
+  
+  def center
+    Point.new(@top_left.x + (width / 2.0), @top_left.y + (height / 2.0))
+  end
 end
 
 class Point
@@ -146,6 +157,14 @@ class Point
     @x = x
     @y = y
   end
+  
+  def distance(point)
+    Math.sqrt(((point.x - @x) ** 2) + ((point.y - @y) ** 2))
+  end
+  
+  def to_s
+    "#{@x},#{@y}"
+  end
 end
 
 class Tracer
@@ -154,9 +173,9 @@ class Tracer
     @scope_level = 0
   end
   
-  def trace(message, annotations = nil, &block)
-    if annotations
-      print("#{message}: #{summarize(annotations)}")
+  def trace(message, inputs = nil, &block)
+    if inputs
+      print("#{message}: #{summarize(inputs)}")
     else
       print(message)
     end
@@ -171,16 +190,16 @@ class Tracer
   
   private
   
-  def summarize(annotations)
-    annotations = if annotations.nil?
+  def summarize(results)
+    results = if results.nil?
       []
-    elsif !annotations.is_a?(Array)
-      [annotations]
+    elsif !results.is_a?(Array)
+      [results]
     else
-      annotations
+      results
     end
       
-    annotations.map(&:description).join(', ')
+    results.map(&:to_s).join(', ')
   end
   
   def print(message)
@@ -501,9 +520,228 @@ class DateMerger
   end
 end
 
+class WrittenDateStateMachine
+  def initialize
+    @result = []
+    reset
+  end
+  
+  def process(annotation)
+    @segments << annotation
+    
+    if @state == :start
+      process_start(annotation)
+    elsif @state == :month
+      process_month(annotation)
+    elsif @state == :day
+      process_day(annotation)
+    elsif @state == :comma
+      process_comma(annotation)
+    elsif @state == :year
+      process_year(annotation)
+    end
+  end
+  
+  def finish
+    reset
+    @result
+  end
+  
+  private
+  
+  def process_start(annotation)
+    if month?(annotation)
+      @state = :month
+    else
+      reset
+    end
+  end
+  
+  def process_month(annotation)
+    if number?(annotation)
+      @state = :day
+    else
+      reset
+    end
+  end
+  
+  def process_day(annotation)
+    if number?(annotation)
+      @state = :year
+      process_year(annotation)
+    elsif comma?(annotation)
+      @state = :year
+    else
+      reset
+    end
+  end
+  
+  def process_comma(annotation)
+    if comma?(annotation)
+      @state = :year
+    else
+      reset
+    end
+  end
+  
+  def process_year(annotation)
+    if number?(annotation)
+      @segments = merge_with_spacing(@segments)
+    end
+    
+    reset
+  end
+  
+  def reset
+    @state = :start
+    @current_separator = nil
+    @result.push(*@segments)
+    @segments = []
+  end
+  
+  def number?(annotation)
+    annotation.description =~ /\AO?\d+\Z/
+  end
+  
+  def comma?(annotation)
+    annotation.description == ','
+  end
+  
+  def month?(annotation)
+    months.include?(annotation.description.downcase)
+  end
+  
+  def months
+    [
+      'january',
+      'february',
+      'march',
+      'april',
+      'may',
+      'june',
+      'july',
+      'august',
+      'september',
+      'october',
+      'november',
+      'december',
+      
+      'jan',
+      'feb',
+      'mar',
+      'apr',
+      'may',
+      'jun',
+      'jul',
+      'aug',
+      'sep',
+      'oct',
+      'nov',
+      'dec',
+    ]
+  end
+  
+  def merge_with_spacing(segments)
+    if comma?(segments[2])
+      segments = [segments[0], AnnotationMerger.new([segments[1], segments[2]]).merged, segments[3]]
+    end
+    
+    [AnnotationMerger.new(segments, ' ').merged]
+  end
+end
+
+class WrittenDateMerger  
+  def merge(annotations)
+    state_machine = WrittenDateStateMachine.new
+    
+    annotations.each do |annotation|
+      state_machine.process(annotation)
+    end
+    state_machine.finish
+  end
+end
+
+module DueDate
+  class ClosestToAnnotationCompositeStrategy
+    def initialize(tracer, word)
+      @tracer = tracer
+      @word = word
+    end
+    
+    def find(annotations)
+      ClosestToAnnotationStrategy.new(@tracer, labels(@word, annotations).first).find(annotations)
+    end
+    
+    private
+    
+    def labels(description, annotations)
+      annotations.select { |annotation| annotation.description.downcase == description }
+    end
+  end
+  
+  class ClosestToAnnotationStrategy  
+    def initialize(tracer, reference)
+      @tracer = tracer
+      @reference = reference
+    end
+    
+    def find(annotations)
+      closest(dates(annotations), @reference)
+    end
+    
+    private
+    
+    def closest(annotations, reference)
+      @tracer.trace("Finding closest to #{reference}") do
+        distances = annotations.map do |annotation|
+          { distance: annotation.bounds.center.distance(reference.bounds.center), annotation: annotation }
+        end
+      
+        if distances
+          (distances.min { |d1, d2| d1[:distance] <=> d2[:distance] })[:annotation]
+        end
+      end
+    end
+    
+    def distance(annotaiton_1, annotation_2)
+      annotation_1.bounds.center.distance(annotation_2.bounds.center)
+    end
+    
+    def dates(annotations)
+      @tracer.trace('Finding dates') do
+        annotations.select { |annotation| date?(annotation) }
+      end
+    end
+    
+    def date?(annotation)
+      str = annotation.description.downcase
+      parse_date(str, '%m-%d-%Y') ||
+      parse_date(str, '%m-%d-%y') ||
+      parse_date(str, '%m/%d/%Y') ||
+      parse_date(str, '%m/%d/%y') ||
+      parse_date(annotation.description.capitalize, '%B %d, %Y') ||
+      parse_date(annotation.description.capitalize, '%B %d %Y')
+    end
+    
+    def parse_date(string, format)
+      begin
+        Date.strptime(string, format)
+      rescue
+        nil
+      end
+    end
+  end
+end
+
 
 annotations = AnnotationsFactory.new(JSON.parse(File.read(file))).create_annotations
 annotation = TotalPaymentAmount::LookToTheRightComposerStrategy.new(Tracer.new($stdout)).find(annotations)
+
+annotation = DueDate::ClosestToAnnotationCompositeStrategy.new(Tracer.new($stdout), 'due').find(annotations)
+puts "DUE: #{annotation}"
+
+annotation = DueDate::ClosestToAnnotationCompositeStrategy.new(Tracer.new($stdout), 'date').find(annotations)
+puts "DATE: #{annotation}"
 
 file =~ /(\d+)_\d+/
 csv = "#{$1}.csv"
@@ -516,3 +754,4 @@ puts "amount: #{amount}"
 puts "found: #{extracted}"
 puts "match: #{amount == extracted}"
 puts
+
