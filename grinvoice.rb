@@ -456,6 +456,9 @@ class DateStateMachine
     if separator?(annotation)
       @state = :month
       @current_separator = annotation.description
+    elsif number?(annotation)
+      @result << @segments.shift
+      @state = :separator_1
     else
       reset
     end
@@ -560,6 +563,9 @@ class WrittenDateStateMachine
   def process_month(annotation)
     if number?(annotation)
       @state = :day
+    elsif month?(annotation)
+      @result << @segments.shift
+      @state = :month
     else
       reset
     end
@@ -661,74 +667,191 @@ class WrittenDateMerger
   end
 end
 
-module DueDate
-  class ClosestToAnnotationCompositeStrategy
-    def initialize(tracer, word)
+module InvoiceDates
+  class LookToTheRightComposerStrategy
+    def initialize(tracer)
       @tracer = tracer
-      @word = word
     end
     
     def find(annotations)
-      ClosestToAnnotationStrategy.new(@tracer, labels(@word, annotations).first).find(annotations)
-    end
-    
-    private
-    
-    def labels(description, annotations)
-      annotations.select { |annotation| annotation.description.downcase == description }
+      ['due'].each do |reference_word|
+        date = LookToTheRightStrategy.new(@tracer, reference_word).find(annotations)
+        return date if date
+      end
+      
+      ['due'].each do |reference_word|
+        date = LookBelowStrategy.new(@tracer, reference_word).find(annotations)
+        return date if date
+      end
+      
+      return nil
     end
   end
   
-  class ClosestToAnnotationStrategy  
-    def initialize(tracer, reference)
+  class LookToTheRightStrategy
+    def initialize(tracer, reference_word)
       @tracer = tracer
-      @reference = reference
+      @reference_word = reference_word.downcase
     end
-    
-    def find(annotations)
-      closest(dates(annotations), @reference)
-    end
-    
+  
+    def find(annotations)    
+      first_date(annotations)
+    end  
+  
     private
-    
-    def closest(annotations, reference)
-      @tracer.trace("Finding closest to #{reference}") do
-        distances = annotations.map do |annotation|
-          { distance: annotation.bounds.center.distance(reference.bounds.center), annotation: annotation }
-        end
-      
-        if distances
-          (distances.min { |d1, d2| d1[:distance] <=> d2[:distance] })[:annotation]
+  
+    def first_date(annotations)
+      @tracer.trace('Finding first date') do
+        all_dates(annotations).first
+      end
+    end
+  
+    def all_dates(annotations)
+      @tracer.trace('Finding all dates') do
+        date_labels(annotations).map do |label|
+          first_to_the_right_of(
+            label,
+            all_horizontally_aligned_with(
+              label,
+              dates(annotations)))
+        end.compact
+      end
+    end
+  
+    def date_labels(annotations)
+      @tracer.trace('Finding all date labels') do
+        annotations.select do |annotation|
+          annotation.description.downcase == @reference_word
         end
       end
     end
-    
-    def distance(annotaiton_1, annotation_2)
-      annotation_1.bounds.center.distance(annotation_2.bounds.center)
+  
+    def all_horizontally_aligned_with(reference, annotations)
+      @tracer.trace('Finding all horizontally aligned with', [reference]) do
+        annotations.select { |annotation| horizontally_aligned?(reference, annotation) }
+      end
+    end
+  
+    def first_to_the_right_of(reference, annotations)
+      @tracer.trace('Finding the first annotation to the right of', [reference]) do
+        all_to_the_right_of(reference, annotations).first
+      end
+    end
+  
+    def all_to_the_right_of(reference, annotations)
+      @tracer.trace('Finding all annotations to the right of', [reference]) do
+        annotations.select do |annotation|
+          annotation.bounds.center.x >= reference.bounds.center.x
+        end
+      end
+    end
+  
+    def horizontally_aligned?(annotation_1, annotation_2)
+      annotation_1.bounds.center.y >= annotation_2.bounds.top_left.y &&
+      annotation_1.bounds.center.y <= annotation_2.bounds.bottom_left.y
     end
     
     def dates(annotations)
       @tracer.trace('Finding dates') do
-        annotations.select { |annotation| date?(annotation) }
+        annotations.select { |annotation|
+          DateParser.parse(annotation.description) }
       end
     end
-    
-    def date?(annotation)
-      str = annotation.description.downcase
-      parse_date(str, '%m-%d-%Y') ||
-      parse_date(str, '%m-%d-%y') ||
-      parse_date(str, '%m/%d/%Y') ||
-      parse_date(str, '%m/%d/%y') ||
-      parse_date(annotation.description.capitalize, '%B %d, %Y') ||
-      parse_date(annotation.description.capitalize, '%B %d %Y')
+  end
+  
+  class LookBelowStrategy
+    def initialize(tracer, reference_word)
+      @tracer = tracer
+      @reference_word = reference_word.downcase
+    end
+  
+    def find(annotations)    
+      first_date(annotations)
+    end  
+  
+    private
+  
+    def first_date(annotations)
+      @tracer.trace('Finding first date') do
+        all_dates(annotations).first
+      end
+    end
+  
+    def all_dates(annotations)
+      @tracer.trace('Finding all dates') do
+        date_labels(annotations).map do |label|
+          first_below(
+            label,
+            all_vertically_aligned_with(
+              label,
+              dates(annotations)))
+        end.compact
+      end
+    end
+  
+    def date_labels(annotations)
+      @tracer.trace('Finding all date labels') do
+        annotations.select do |annotation|
+          annotation.description.downcase == @reference_word
+        end
+      end
+    end
+  
+    def all_vertically_aligned_with(reference, annotations)
+      @tracer.trace('Finding all vertically aligned with', [reference]) do
+        annotations.select { |annotation| vertically_aligned?(reference, annotation) }
+      end
+    end
+  
+    def first_below(reference, annotations)
+      @tracer.trace('Finding the first annotation below', [reference]) do
+        all_below(reference, annotations).first
+      end
+    end
+  
+    def all_below(reference, annotations)
+      @tracer.trace('Finding all annotations below', [reference]) do
+        annotations.select do |annotation|
+          annotation.bounds.center.y >= reference.bounds.center.y
+        end
+      end
+    end
+  
+    def vertically_aligned?(annotation_1, annotation_2)
+      annotation_1.bounds.center.x >= annotation_2.bounds.top_left.x &&
+      annotation_1.bounds.center.x <= annotation_2.bounds.top_right.x
     end
     
-    def parse_date(string, format)
-      begin
-        Date.strptime(string, format)
-      rescue
-        nil
+    def dates(annotations)
+      @tracer.trace('Finding dates') do
+        annotations.select { |annotation| 
+          DateParser.parse(annotation.description) }
       end
+    end
+  end
+end
+
+class DateParser
+  def self.parse(string)
+    str = string.downcase
+    if str =~ /\d\d?(-|\/)\d\d?(-|\/)\d\d\d\d/
+      safe_parse(str, '%m-%d-%Y') ||
+      safe_parse(str, '%m/%d/%Y')
+    else
+      safe_parse(str, '%m-%d-%y') ||
+      safe_parse(str, '%m/%d/%y') ||
+      safe_parse(str.capitalize, '%B %d, %Y') ||
+      safe_parse(str.capitalize, '%B %d %Y')
+    end
+  end
+
+  private
+
+  def self.safe_parse(string, format)
+    begin
+      Date.strptime(string, format)
+    rescue
+      nil
     end
   end
 end
@@ -736,22 +859,27 @@ end
 
 annotations = AnnotationsFactory.new(JSON.parse(File.read(file))).create_annotations
 annotation = TotalPaymentAmount::LookToTheRightComposerStrategy.new(Tracer.new($stdout)).find(annotations)
+total_amount = annotation ? annotation.description.gsub(' ', '').gsub(',', '') : ''
 
-annotation = DueDate::ClosestToAnnotationCompositeStrategy.new(Tracer.new($stdout), 'due').find(annotations)
-puts "DUE: #{annotation}"
+annotation = InvoiceDates::LookToTheRightComposerStrategy.new(Tracer.new($stdout)).find(annotations)
+due_date = annotation ? DateParser.parse(annotation.description).to_s : ''
 
-annotation = DueDate::ClosestToAnnotationCompositeStrategy.new(Tracer.new($stdout), 'date').find(annotations)
-puts "DATE: #{annotation}"
-
-file =~ /(\d+)_\d+/
+file =~ /(.*)_\d+/
 csv = "#{$1}.csv"
-amount = CSV.read(csv)[1][3]
-extracted = annotation ? annotation.description.gsub(' ', '') : ''
 
+data = CSV.read(csv)
+actual_total_amount = data[1][3]
+actual_due_date = data[1][8]
+
+puts
 puts "image: #{file}"
 puts "csv: #{csv}"
-puts "amount: #{amount}"
-puts "found: #{extracted}"
-puts "match: #{amount == extracted}"
 puts
-
+puts "actual total amount: #{actual_total_amount}"
+puts "found total amount: #{total_amount}"
+puts "total amount match: #{total_amount == actual_total_amount}"
+puts
+puts "actual due date: #{actual_due_date}"
+puts "found due date: #{due_date}"
+puts "due date match: #{due_date == actual_due_date}"
+puts
